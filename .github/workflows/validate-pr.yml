@@ -207,14 +207,3 @@ jobs:
         env:
           ENTRY_FILES: ${{ steps.entries.outputs.files }}
 
-      - name: Label PR as registration
-        if: steps.entries.outputs.files != ''
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              labels: ['registration'],
-            });

@@ -1,8 +1,9 @@
 name: Auto-merge validated registrations
 
 on:
-  pull_request:
-    types: [labeled]
+  workflow_run:
+    workflows: ["Validate Registry PR"]
+    types: [completed]
 
 permissions:
   contents: write
@@ -11,57 +12,96 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.event.label.name == 'registration'
+    if: github.event.workflow_run.conclusion == 'success'
     steps:
-      - name: Auto-merge
+      - name: Find and merge validated registration PRs
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = context.payload.pull_request.number;
-            const pr = context.payload.pull_request;
+            // Get PRs associated with this workflow run
+            const runId = context.payload.workflow_run.id;
+            const headSha = context.payload.workflow_run.head_sha;
+            const headBranch = context.payload.workflow_run.head_branch;
 
-            console.log(`PR #${prNumber}: has "registration" label, checking validation status...`);
+            console.log(`Workflow run ${runId} succeeded on branch ${headBranch} (${headSha})`);
 
-            // Wait briefly for checks to settle
-            await new Promise(r => setTimeout(r, 5000));
-
-            // Verify the validate check passed
-            const { data: checks } = await github.rest.checks.listForRef({
+            // Find open PRs from this branch
+            const { data: prs } = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              ref: pr.head.sha,
+              state: 'open',
+              head: `${context.payload.workflow_run.head_repository.owner.login}:${headBranch}`,
             });
-            const validateCheck = checks.check_runs.find(c => c.name === 'validate');
-            if (!validateCheck || validateCheck.conclusion !== 'success') {
-              console.log(`PR #${prNumber}: validation check not passed (${validateCheck?.conclusion || 'not found'}), skipping`);
+
+            if (prs.length === 0) {
+              console.log('No open PRs found for this branch');
               return;
             }
-            console.log(`PR #${prNumber}: validation passed`);
 
-            // Approve
-            try {
-              await github.rest.pulls.createReview({
+            for (const pr of prs) {
+              console.log(`\nProcessing PR #${pr.number}: ${pr.title}`);
+
+              // Verify this is a registration PR (only touches v1/by-id/)
+              const { data: files } = await github.rest.pulls.listFiles({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                pull_number: prNumber,
-                event: 'APPROVE',
-                body: 'Auto-approved: all validation checks passed.',
+                pull_number: pr.number,
               });
-              console.log(`PR #${prNumber}: approved`);
-            } catch (e) {
-              console.log(`PR #${prNumber}: approve skipped: ${e.message}`);
-            }
 
-            // Merge
-            try {
-              await github.rest.pulls.merge({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-                merge_method: 'squash',
-                commit_title: `${pr.title}`,
-              });
-              console.log(`PR #${prNumber}: merged`);
-            } catch (e) {
-              console.log(`PR #${prNumber}: merge failed: ${e.message}`);
+              const registryFiles = files.filter(f =>
+                f.filename.startsWith('v1/by-id/') && f.filename.endsWith('.json')
+              );
+              const nonRegistryFiles = files.filter(f =>
+                !f.filename.startsWith('v1/by-id/')
+              );
+
+              if (registryFiles.length === 0) {
+                console.log('  No registry entries, skipping');
+                continue;
+              }
+              if (nonRegistryFiles.length > 0) {
+                console.log('  Contains non-registry changes, skipping auto-merge');
+                continue;
+              }
+
+              // Add registration label
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: ['registration'],
+                });
+                console.log('  Labeled as registration');
+              } catch (e) {
+                console.log(`  Label failed: ${e.message}`);
+              }
+
+              // Approve
+              try {
+                await github.rest.pulls.createReview({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  event: 'APPROVE',
+                  body: 'Auto-approved: all validation checks passed.',
+                });
+                console.log('  Approved');
+              } catch (e) {
+                console.log(`  Approve skipped: ${e.message}`);
+              }
+
+              // Merge
+              try {
+                await github.rest.pulls.merge({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  merge_method: 'squash',
+                  commit_title: pr.title,
+                });
+                console.log('  Merged');
+              } catch (e) {
+                console.log(`  Merge failed: ${e.message}`);
+              }
             }
