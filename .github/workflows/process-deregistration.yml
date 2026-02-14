@@ -1,0 +1,178 @@
+name: Process Deregistration
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    if: contains(github.event.issue.body, '<!-- furchain-deregistration')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add deregistration label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: ['deregistration'],
+            });
+
+      - name: Extract and process deregistration
+        id: process
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+            const issueAuthor = issue.user.login;
+
+            // 1. Extract JSON from HTML comment
+            const match = body.match(/<!-- furchain-deregistration\s+([\s\S]*?)\s+furchain-deregistration -->/);
+            if (!match) {
+              core.setFailed('No deregistration payload found in issue body');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: '**Processing failed:** No `furchain-deregistration` payload found in the issue body.',
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            let payload;
+            try {
+              payload = JSON.parse(match[1].trim());
+            } catch (e) {
+              core.setFailed(`Invalid JSON in deregistration payload: ${e.message}`);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Processing failed:** Invalid JSON in deregistration payload.\n\n\`\`\`\n${e.message}\n\`\`\``,
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            // 2. Verify entry exists
+            const entryPath = path.join('v1', 'by-id', `${payload.id}.json`);
+            if (!fs.existsSync(entryPath)) {
+              core.setFailed(`Entry ${payload.id} not found`);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Processing failed:** No registry entry found for ID \`${payload.id}\`.`,
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            const entry = JSON.parse(fs.readFileSync(entryPath, 'utf-8'));
+
+            // 3. Authorization: issue author must be the entry owner
+            if (issueAuthor !== entry.owner) {
+              core.setFailed(`Unauthorized: issue author "${issueAuthor}" does not match entry owner "${entry.owner}"`);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Processing failed:** Only the character owner (@${entry.owner}) can request deregistration.`,
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            // 4. Check if already inactive
+            if (entry.status === 'inactive') {
+              core.setFailed('Entry is already inactive');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Processing failed:** This character is already deregistered.`,
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            // 5. Update entry with inactive status
+            const updated = { ...entry, status: 'inactive' };
+            fs.writeFileSync(entryPath, JSON.stringify(updated, null, 2) + '\n');
+
+            core.setOutput('entry_path', entryPath);
+            core.setOutput('entry_name', entry.name);
+            core.setOutput('entry_display', entry.display);
+            core.setOutput('issue_number', issue.number);
+
+      - name: Commit and push
+        if: steps.process.outputs.entry_path != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ steps.process.outputs.entry_path }}"
+          git commit -m "chore: deregister ${{ steps.process.outputs.entry_name }}"
+          git push
+
+      - name: Close issue with success
+        if: steps.process.outputs.entry_path != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = ${{ steps.process.outputs.issue_number }};
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: `**Deregistration approved.** ${{ steps.process.outputs.entry_display }} has been deregistered. The entry remains accessible by ID but is removed from search indexes.`,
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: ['approved'],
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              state: 'closed',
+            });

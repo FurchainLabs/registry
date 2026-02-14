@@ -47,23 +47,32 @@ Use the Furchain CLI:
 furchain register --submit
 ```
 
-This forks the registry, creates a branch with your character's entry, and opens a PR. The CI workflow validates the entry before merge.
+This creates a GitHub Issue on this repository with your character's entry embedded in the issue body. A GitHub Actions workflow automatically validates the entry and, if all checks pass, commits it to the registry.
 
-## Manual Registration
+## How It Works
 
-1. Fork this repository
-2. Create `v1/by-id/<your-character-uuid>.json` with the schema above
-3. Open a PR to `FurchainLabs/registry`
-4. CI will validate: ID uniqueness, repo accessibility, fingerprint match, schema compliance
+1. The CLI opens an Issue containing a `<!-- furchain-registration {JSON} furchain-registration -->` marker in the body
+2. GitHub Actions triggers on `issues: opened` and detects registration requests by matching the body marker (no label required from the user)
+3. The workflow adds a `registration` label, then runs validation checks
+4. On success: the entry is committed, the Issue gets an `approved` label and is closed
+5. On failure: a `validation-failed` label is added with error details in a comment
 
 ## Validation Rules (Section 20.3)
 
-1. ID must be unique (no existing entry with same UUID)
-2. GitHub owner must exist
-3. Repository must be accessible and public
-4. `furchain.json` in the repo must contain the character
-5. `keys.json` signing key fingerprint must match the registry entry
-6. Entry must pass JSON Schema validation
+1. **Owner identity**: the Issue author MUST match the `owner` field in the entry (you can only register your own characters)
+2. Entry must pass JSON Schema validation
+3. ID must be unique (no existing entry with same UUID)
+4. Repository must be accessible and public
+5. `furchain.json` in the repo must contain the character
+6. `keys.json` signing key fingerprint must match the registry entry
+
+## Deregistration
+
+```bash
+furchain unregister --submit
+```
+
+Creates an Issue with a `<!-- furchain-deregistration ... -->` marker. The workflow verifies the Issue author matches the entry owner, then sets the entry status to `inactive`. Inactive entries remain in `by-id/` but are excluded from derived indexes.
 
 ## HTTP Access
 

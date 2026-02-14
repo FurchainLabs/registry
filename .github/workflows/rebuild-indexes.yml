@@ -35,18 +35,22 @@ jobs:
           }
 
           // Read all entries
-          const entries = [];
+          const allEntries = [];
           for (const f of fs.readdirSync(byIdDir)) {
             if (f === '.gitkeep' || !f.endsWith('.json')) continue;
             try {
               const entry = JSON.parse(fs.readFileSync(path.join(byIdDir, f), 'utf-8'));
-              entries.push(entry);
+              allEntries.push(entry);
             } catch (e) {
               console.error(`Warning: skipping malformed file ${f}: ${e.message}`);
             }
           }
 
-          console.log(`Processing ${entries.length} registry entries`);
+          // Only include active entries in derived indexes
+          // Missing/undefined status is treated as active for backwards compatibility
+          const entries = allEntries.filter(e => !e.status || e.status === 'active');
+
+          console.log(`Processing ${entries.length} active entries (${allEntries.length} total)`);
 
           // Group by name
           const byName = new Map();

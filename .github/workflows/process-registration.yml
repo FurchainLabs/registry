@@ -1,0 +1,254 @@
+name: Process Registration
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    if: contains(github.event.issue.body, '<!-- furchain-registration')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install validation dependencies
+        run: npm install ajv@8 ajv-formats@3
+
+      - name: Add registration label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: ['registration'],
+            });
+
+      - name: Extract and validate registration
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
+
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+            const issueAuthor = issue.user.login;
+
+            // 1. Extract JSON from HTML comment
+            const match = body.match(/<!-- furchain-registration\s+([\s\S]*?)\s+furchain-registration -->/);
+            if (!match) {
+              core.setFailed('No registration payload found in issue body');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: '**Validation failed:** No `furchain-registration` payload found in the issue body.',
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            let entry;
+            try {
+              entry = JSON.parse(match[1].trim());
+            } catch (e) {
+              core.setFailed(`Invalid JSON in registration payload: ${e.message}`);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Validation failed:** Invalid JSON in registration payload.\n\n\`\`\`\n${e.message}\n\`\`\``,
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            // 2. Authorization: issue author must match entry owner
+            if (issueAuthor.toLowerCase() !== entry.owner.toLowerCase()) {
+              core.setFailed(`Unauthorized: issue author "${issueAuthor}" does not match entry owner "${entry.owner}"`);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Validation failed:** Issue author \`${issueAuthor}\` does not match the entry owner \`${entry.owner}\`. You can only register your own characters.`,
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            // 3. Schema validation
+            const Ajv2020 = require('ajv/dist/2020');
+            const addFormats = require('ajv-formats');
+            const ajv = new Ajv2020({ allErrors: true });
+            addFormats(ajv);
+            const schema = JSON.parse(fs.readFileSync('v1/registry-entry.schema.json', 'utf-8'));
+            const validate = ajv.compile(schema);
+
+            if (!validate(entry)) {
+              const errors = validate.errors.map(e => `- ${e.instancePath || '(root)'}: ${e.message}`).join('\n');
+              core.setFailed('Schema validation failed');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Validation failed:** Schema errors:\n\n${errors}`,
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            // 4. Check ID uniqueness
+            const entryPath = path.join('v1', 'by-id', `${entry.id}.json`);
+            if (fs.existsSync(entryPath)) {
+              core.setFailed(`Entry with ID ${entry.id} already exists`);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Validation failed:** An entry with ID \`${entry.id}\` already exists.`,
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            // 5. Verify remote repo
+            const errors = [];
+
+            try {
+              const repoUrl = `https://api.github.com/repos/${entry.owner}/${entry.repo}`;
+              const repoResponse = execSync(`curl -sf -H "Accept: application/vnd.github.v3+json" "${repoUrl}"`, { encoding: 'utf-8' });
+              const repo = JSON.parse(repoResponse);
+              if (repo.private) {
+                errors.push('Repository is private');
+              }
+            } catch (e) {
+              errors.push(`Could not access repository ${entry.owner}/${entry.repo}`);
+            }
+
+            if (errors.length === 0) {
+              try {
+                const furchainUrl = `https://api.github.com/repos/${entry.owner}/${entry.repo}/contents/furchain.json`;
+                const furchainResponse = execSync(`curl -sf -H "Accept: application/vnd.github.raw+json" "${furchainUrl}"`, { encoding: 'utf-8' });
+                const furchain = JSON.parse(furchainResponse);
+                const character = furchain.characters?.find(c => c.id === entry.id);
+                if (!character) {
+                  errors.push(`Character ${entry.id} not found in furchain.json`);
+                }
+              } catch (e) {
+                errors.push('Could not read furchain.json from repository');
+              }
+            }
+
+            if (errors.length === 0) {
+              try {
+                const keysUrl = `https://api.github.com/repos/${entry.owner}/${entry.repo}/contents/keys/keys.json`;
+                const keysResponse = execSync(`curl -sf -H "Accept: application/vnd.github.raw+json" "${keysUrl}"`, { encoding: 'utf-8' });
+                const keys = JSON.parse(keysResponse);
+                const sigKey = keys.keys?.find(k => k.kid === keys.current?.sigKid && k.use === 'sig');
+                if (!sigKey) {
+                  errors.push('No current signing key found in keys.json');
+                } else if (sigKey.fingerprint !== entry.fingerprint) {
+                  errors.push(`Fingerprint mismatch: registry=${entry.fingerprint}, keys.json=${sigKey.fingerprint}`);
+                }
+              } catch (e) {
+                errors.push('Could not read keys.json from repository');
+              }
+            }
+
+            if (errors.length > 0) {
+              const errorList = errors.map(e => `- ${e}`).join('\n');
+              core.setFailed('Remote verification failed');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Validation failed:** Remote verification errors:\n\n${errorList}`,
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['validation-failed'],
+              });
+              return;
+            }
+
+            // 6. All checks passed — write entry file
+            fs.writeFileSync(entryPath, JSON.stringify(entry, null, 2) + '\n');
+
+            // Set outputs for commit step
+            core.setOutput('entry_path', entryPath);
+            core.setOutput('entry_name', entry.name);
+            core.setOutput('entry_display', entry.display);
+            core.setOutput('issue_number', issue.number);
+
+      - name: Commit and push
+        if: steps.validate.outputs.entry_path != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ steps.validate.outputs.entry_path }}"
+          git commit -m "chore: register ${{ steps.validate.outputs.entry_name }}"
+          git push
+
+      - name: Close issue with success
+        if: steps.validate.outputs.entry_path != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = ${{ steps.validate.outputs.issue_number }};
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: `**Registration approved.** ${{ steps.validate.outputs.entry_display }} has been registered successfully.`,
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: ['approved'],
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              state: 'closed',
+            });
