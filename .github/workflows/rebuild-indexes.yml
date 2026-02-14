@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'v1/by-id/**'
+  workflow_dispatch:
 
 permissions:
   contents: write

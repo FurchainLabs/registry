@@ -101,7 +101,80 @@ jobs:
                   commit_title: pr.title,
                 });
                 console.log('  Merged');
+                core.setOutput('merged', 'true');
               } catch (e) {
                 console.log(`  Merge failed: ${e.message}`);
               }
             }
+
+  rebuild-indexes:
+    needs: auto-merge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Rebuild derived indexes
+        run: |
+          node << 'SCRIPT'
+          const fs = require('fs');
+          const path = require('path');
+
+          const byIdDir = 'v1/by-id';
+          const byNameDir = 'v1/derived/by-name';
+          const byOwnerDir = 'v1/derived/by-owner';
+
+          for (const dir of [byNameDir, byOwnerDir]) {
+            for (const f of fs.readdirSync(dir)) {
+              if (f === '.gitkeep') continue;
+              fs.unlinkSync(path.join(dir, f));
+            }
+          }
+
+          const entries = [];
+          for (const f of fs.readdirSync(byIdDir)) {
+            if (f === '.gitkeep' || !f.endsWith('.json')) continue;
+            try {
+              const entry = JSON.parse(fs.readFileSync(path.join(byIdDir, f), 'utf-8'));
+              entries.push(entry);
+            } catch (e) {
+              console.error(`Warning: skipping ${f}: ${e.message}`);
+            }
+          }
+
+          console.log(`Processing ${entries.length} registry entries`);
+
+          const byName = new Map();
+          const byOwner = new Map();
+          for (const entry of entries) {
+            if (!byName.has(entry.name)) byName.set(entry.name, []);
+            byName.get(entry.name).push(entry);
+            if (!byOwner.has(entry.owner)) byOwner.set(entry.owner, []);
+            byOwner.get(entry.owner).push(entry);
+          }
+
+          for (const [name, nameEntries] of byName) {
+            const sorted = nameEntries.sort((a, b) => a.registered.localeCompare(b.registered));
+            fs.writeFileSync(path.join(byNameDir, `${name}.json`), JSON.stringify(sorted, null, 2) + '\n');
+          }
+          console.log(`Wrote ${byName.size} by-name indexes`);
+
+          for (const [owner, ownerEntries] of byOwner) {
+            const sorted = ownerEntries.sort((a, b) => a.name.localeCompare(b.name));
+            fs.writeFileSync(path.join(byOwnerDir, `${owner}.json`), JSON.stringify(sorted, null, 2) + '\n');
+          }
+          console.log(`Wrote ${byOwner.size} by-owner indexes`);
+          SCRIPT
+
+      - name: Commit and push derived indexes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add v1/derived/
+          if git diff --cached --quiet; then
+            echo "No changes to derived indexes"
+          else
+            git commit -m "chore: rebuild derived indexes"
+            git push
+          fi
