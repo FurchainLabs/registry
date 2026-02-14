@@ -129,23 +129,43 @@ jobs:
               return;
             }
 
-            // 4. Check ID uniqueness
+            // 4. Check ID uniqueness (allow re-registration of inactive entries by same owner)
             const entryPath = path.join('v1', 'by-id', `${entry.id}.json`);
             if (fs.existsSync(entryPath)) {
-              core.setFailed(`Entry with ID ${entry.id} already exists`);
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                body: `**Validation failed:** An entry with ID \`${entry.id}\` already exists.`,
-              });
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                labels: ['validation-failed'],
-              });
-              return;
+              const existing = JSON.parse(fs.readFileSync(entryPath, 'utf-8'));
+              if (existing.status !== 'inactive') {
+                core.setFailed(`Entry with ID ${entry.id} already exists and is active`);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `**Validation failed:** An active entry with ID \`${entry.id}\` already exists. Deregister it first.`,
+                });
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['validation-failed'],
+                });
+                return;
+              }
+              if (existing.owner.toLowerCase() !== issueAuthor.toLowerCase()) {
+                core.setFailed(`Cannot re-register: entry is owned by ${existing.owner}`);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `**Validation failed:** This entry was previously registered by \`${existing.owner}\`. Only the original owner can re-register.`,
+                });
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['validation-failed'],
+                });
+                return;
+              }
+              // Inactive entry by same owner — allow re-registration
             }
 
             // 5. Verify remote repo
