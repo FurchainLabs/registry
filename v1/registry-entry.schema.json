@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://furchainlabs.github.io/registry/v1/registry-entry.schema.json",
+  "title": "Furchain Registry Entry",
+  "description": "A single character registration in the Furchain registry (v1).",
+  "type": "object",
+  "required": ["id", "name", "display", "owner", "repo", "path", "fingerprint", "registered"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Character UUIDv7",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "name": {
+      "type": "string",
+      "description": "Character name (lowercase, alphanumeric + hyphens)",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "display": {
+      "type": "string",
+      "description": "Human-readable display name",
+      "minLength": 1
+    },
+    "owner": {
+      "type": "string",
+      "description": "GitHub username of the character owner",
+      "minLength": 1
+    },
+    "repo": {
+      "type": "string",
+      "description": "GitHub repository name containing the character data",
+      "minLength": 1
+    },
+    "path": {
+      "type": "string",
+      "description": "Path to the character directory within the repo (e.g. characters/luna)",
+      "minLength": 1
+    },
+    "fingerprint": {
+      "type": "string",
+      "description": "SHA-256 fingerprint of the current signing public key",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "registered": {
+      "type": "string",
+      "description": "ISO-8601 timestamp of registration",
+      "format": "date-time"
+    }
+  }
+}
